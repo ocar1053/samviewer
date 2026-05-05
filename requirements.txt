@@ -1,4 +1,5 @@
 streamlit>=1.34
+streamlit-image-coordinates>=0.4.0
 opencv-python>=4.9
 numpy>=1.26
 Pillow>=10.0

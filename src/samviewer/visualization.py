@@ -3,7 +3,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from samviewer.metrics import BoundingBox, clamp_bbox, scale_bbox
+from samviewer.metrics import BoundingBox, Point, clamp_bbox, scale_bbox
 
 
 REF_COLOR = (0, 200, 255)
@@ -57,6 +57,86 @@ def overlay_bboxes(
     out = image.copy()
     out = draw_bbox(out, ref_bbox, REF_COLOR, "reference")
     out = draw_bbox(out, real_bbox, REAL_COLOR, "real")
+    return out
+
+
+def draw_points_polygon(
+    image: np.ndarray,
+    points: list[Point] | None,
+    color: tuple[int, int, int] = REF_COLOR,
+    label: str | None = None,
+    closed: bool = True,
+) -> np.ndarray:
+    out = image.copy()
+    if not points:
+        return out
+
+    int_points = [(round(point[0]), round(point[1])) for point in points]
+    if len(int_points) >= 2:
+        cv2.polylines(
+            out,
+            [np.asarray(int_points, dtype=np.int32)],
+            isClosed=closed and len(int_points) >= 3,
+            color=color,
+            thickness=2,
+            lineType=cv2.LINE_AA,
+        )
+
+    for index, point in enumerate(int_points, start=1):
+        cv2.circle(out, point, 5, color, -1, cv2.LINE_AA)
+        cv2.putText(
+            out,
+            str(index),
+            (point[0] + 7, point[1] - 7),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    if label:
+        x = min(point[0] for point in int_points)
+        y = min(point[1] for point in int_points)
+        cv2.putText(
+            out,
+            label,
+            (x, max(18, y - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    return out
+
+
+def draw_mask_outline(
+    image: np.ndarray,
+    mask: np.ndarray | None,
+    color: tuple[int, int, int] = REF_COLOR,
+    label: str | None = None,
+) -> np.ndarray:
+    out = image.copy()
+    if mask is None:
+        return out
+    outline = mask_outline(mask, color)
+    outline_pixels = outline.any(axis=2)
+    out[outline_pixels] = outline[outline_pixels]
+    if label:
+        ys, xs = np.where(mask > 0)
+        if len(xs) and len(ys):
+            cv2.putText(
+                out,
+                label,
+                (int(xs.min()), max(18, int(ys.min()) - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
     return out
 
 

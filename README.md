@@ -12,13 +12,18 @@ pixel size and center position across the two images.
 - Reference image upload or path loading.
 - Captured real frame snapshot.
 - Manual ROI selection for the reference object and the real object.
+- Browser-based mouse annotation:
+  - drag a bbox over the object
+  - click four ordered table corners
 - OpenCV `selectROI` window when a desktop GUI is available.
 - Numeric ROI fallback for remote or headless environments.
 - Pixel metrics for bbox width, height, area, center, size error, and center
   offset.
+- Corner metrics for four corresponding points, including per-corner offset,
+  mean/max offset, polygon area error, and center offset.
 - Side-by-side view and blended overlay view.
-- Optional segmentation extension point with a bbox-mask fallback. SAM2 can be
-  wired into `src/samviewer/segmentation.py` later without changing the UI flow.
+- Optional segmentation backend. The default bbox-mask fallback has no extra
+  dependencies; SAM2 can be enabled separately and used with a box prompt.
 
 ## Setup
 
@@ -55,6 +60,20 @@ Then open the URL printed by Streamlit, usually `http://localhost:8501`.
 7. Use the metrics and live reference bbox overlay while moving the physical
    camera.
 
+## Mouse Annotation
+
+Each reference/real panel has three annotation tools:
+
+- **Drag bbox**: drag over the target object to set the bbox.
+- **Click 4 corners**: click the object corners in order: top-left, top-right,
+  bottom-right, bottom-left. The app draws a quadrilateral and uses its tight
+  bbox for the basic pixel-size metrics.
+- **Numeric / OpenCV**: edit bbox numbers directly or use OpenCV `selectROI`.
+
+When both reference and real images have four corners, the app also reports
+corner offsets and polygon area error. This is useful for table-top alignment
+because it compares the visible table plane more directly than a plain bbox.
+
 ## Notes
 
 - For true pixel-size comparison, use the same resolution for the rendered
@@ -64,9 +83,46 @@ Then open the URL printed by Streamlit, usually `http://localhost:8501`.
 - `OpenCV selectROI` opens a native desktop window. If the app runs on a remote
   server without GUI forwarding, use the numeric ROI controls instead.
 
+## Optional SAM2 Backend
+
+This project keeps SAM2 optional because it pulls in PyTorch, model weights, and
+possibly CUDA compilation. The app will keep working with the bbox fallback if
+SAM2 is not installed.
+
+Official repo: <https://github.com/facebookresearch/sam2>
+
+Recommended setup:
+
+```bash
+cd /home/ocarpan/samviewer
+source .venv/bin/activate
+
+# Install PyTorch/TorchVision for your CUDA or CPU environment first.
+# See https://pytorch.org/get-started/locally/
+
+git clone https://github.com/facebookresearch/sam2.git /home/ocarpan/sam2
+cd /home/ocarpan/sam2
+pip install -e .
+
+# Needed only when loading models by Hugging Face model id in the viewer.
+pip install huggingface_hub
+```
+
+In the viewer:
+
+1. Expand **Optional segmentation interface**.
+2. Choose **SAM2**.
+3. Use `facebook/sam2.1-hiera-tiny` for the lightest Hugging Face option, or
+   choose a local config + checkpoint.
+4. Select an ROI first, then click **Create reference mask from ROI** or
+   **Create real mask from ROI**.
+
+The app uses your selected ROI as SAM2's box prompt, chooses the highest-scoring
+mask, computes a tight bbox from that mask, and updates the ROI used by the
+alignment metrics.
+
 ## Future Extensions
 
-- Add a SAM2 backend in `segmentation.py` for mask generation from points or
-  boxes.
+- Add point prompts for positive/negative corrections after the box prompt.
 - Add four-point correspondence selection and homography estimation.
 - Add ArUco/AprilTag marker detection for scale or camera pose hints.
