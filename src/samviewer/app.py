@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -18,16 +19,12 @@ from samviewer.camera import (
     scan_camera_indices,
 )
 from samviewer.metrics import (
-    AlignmentMetrics,
     BoundingBox,
-    CornerAlignmentMetrics,
     Point,
     bbox_from_points,
     bbox_to_mapping,
     clamp_bbox,
-    compute_alignment,
     compute_bbox_iou,
-    compute_corner_alignment,
     scale_points,
     scale_bbox,
 )
@@ -39,12 +36,16 @@ from samviewer.visualization import (
     draw_mask_outline,
     draw_points_polygon,
     overlay_bboxes,
-    overlay_reference_image,
 )
 
 
-MAX_ANNOTATION_WIDTH = 640
-MAX_LIVE_ANNOTATION_WIDTH = 960
+MAX_ANNOTATION_WIDTH = 1280
+MAX_LIVE_ANNOTATION_WIDTH = 1280
+REFERENCE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+DEFAULT_REFERENCE_FOLDER = "reference_images"
+DEFAULT_CAMERA_BACKEND_LABEL = "Windows DirectShow" if sys.platform.startswith("win") else "Auto"
+DEFAULT_ANNOTATION_TOOL = "Click 4 corners"
+ANNOTATION_DEFAULTS_VERSION = 3
 
 
 def _format_percent(value: float) -> str:
@@ -66,17 +67,13 @@ def main() -> None:
     _render_camera_controls(config)
 
     live_frame = st.session_state.get("live_frame")
-    real_frame = st.session_state.get("real_frame")
     reference = st.session_state.get("reference_image")
 
     st.divider()
+    _render_reference_roi_panel(reference, live_frame)
+
+    st.divider()
     _render_live_panel(live_frame, reference)
-
-    st.divider()
-    _render_roi_panels(reference, real_frame)
-
-    st.divider()
-    _render_alignment_panel(reference, real_frame)
 
     _maybe_rerun_live_preview()
 
@@ -87,16 +84,19 @@ def _init_state() -> None:
         "camera_running": False,
         "camera_source_text": "0",
         "camera_indices": [0],
+        "camera_backend_label": DEFAULT_CAMERA_BACKEND_LABEL,
         "live_frame": None,
         "real_frame": None,
         "reference_image": None,
         "reference_name": None,
-        "reference_upload_key": None,
+        "reference_source_key": None,
+        "reference_folder_text": DEFAULT_REFERENCE_FOLDER,
+        "reference_folder_recursive": False,
         "ref_roi": None,
         "real_roi": None,
         "ref_roi_shape": None,
         "real_roi_shape": None,
-        "ref_roi_enabled": False,
+        "ref_roi_enabled": True,
         "real_roi_enabled": False,
         "ref_mask": None,
         "real_mask": None,
@@ -105,9 +105,13 @@ def _init_state() -> None:
         "ref_points_shape": None,
         "real_points_shape": None,
         "live_roi_enabled": False,
+        "live_annotation_tool": DEFAULT_ANNOTATION_TOOL,
+        "freeze_live_while_annotating": True,
         "live_last_bbox_event": None,
-        "ref_annotation_tool": "Drag bbox",
-        "real_annotation_tool": "Click 4 corners",
+        "live_last_point_event": None,
+        "ref_annotation_tool": DEFAULT_ANNOTATION_TOOL,
+        "real_annotation_tool": DEFAULT_ANNOTATION_TOOL,
+        "annotation_defaults_version": 0,
         "ref_last_bbox_event": None,
         "real_last_bbox_event": None,
         "ref_last_point_event": None,
@@ -116,14 +120,37 @@ def _init_state() -> None:
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
 
+    if st.session_state.annotation_defaults_version < ANNOTATION_DEFAULTS_VERSION:
+        st.session_state.live_annotation_tool = DEFAULT_ANNOTATION_TOOL
+        st.session_state.ref_annotation_tool = DEFAULT_ANNOTATION_TOOL
+        st.session_state.real_annotation_tool = DEFAULT_ANNOTATION_TOOL
+        st.session_state.ref_roi_enabled = True
+        st.session_state.freeze_live_while_annotating = True
+        st.session_state.annotation_defaults_version = ANNOTATION_DEFAULTS_VERSION
+
 
 def _render_sidebar() -> CameraConfig:
     with st.sidebar:
         st.header("Camera")
 
+        backend_options = _camera_backend_options()
+        backend_labels = list(backend_options)
+        backend_label = st.session_state.get("camera_backend_label", DEFAULT_CAMERA_BACKEND_LABEL)
+        if backend_label not in backend_options:
+            backend_label = "Auto"
+        backend_choice = st.selectbox(
+            "Camera backend",
+            backend_labels,
+            index=backend_labels.index(backend_label),
+            help="On Windows, DirectShow often fails faster and avoids Media Foundation camera stalls.",
+        )
+        st.session_state.camera_backend_label = backend_choice
+        backend = backend_options[backend_choice]
+
         if st.button("Scan camera indices", use_container_width=True):
             try:
-                found = scan_camera_indices(5)
+                with st.spinner("Scanning cameras..."):
+                    found = scan_camera_indices(5, backend=backend)
                 st.session_state.camera_indices = found or [0]
             except Exception as exc:
                 st.warning(f"Camera scan failed: {exc}")
@@ -141,53 +168,50 @@ def _render_sidebar() -> CameraConfig:
             source_text = source_choice
         st.session_state.camera_source_text = source_text
 
-        width = st.number_input("Capture width", min_value=0, value=1920, step=160)
-        height = st.number_input("Capture height", min_value=0, value=1080, step=90)
+        width = st.number_input("Capture width", min_value=0, value=1280, step=160)
+        height = st.number_input("Capture height", min_value=0, value=720, step=90)
         st.checkbox("Live preview", key="live_preview", value=True)
         st.slider("Preview FPS", min_value=1, max_value=15, value=5, key="preview_fps")
 
-        st.header("Alignment")
-        st.radio(
-            "Guide mode",
-            ["Scale only", "Scale + center"],
-            index=1,
-            horizontal=False,
-            key="guide_mode",
-        )
+        st.header("Live overlay")
         st.checkbox("Overlay reference bbox on live frame", key="overlay_ref_live", value=True)
-        st.checkbox("Normalize reference bbox to real frame size", key="normalize_bbox", value=True)
 
         return CameraConfig(
             source=parse_camera_source(source_text),
             width=width or None,
             height=height or None,
+            backend=backend,
         )
+
+
+def _camera_backend_options() -> dict[str, int | None]:
+    options: dict[str, int | None] = {"Auto": None}
+    if sys.platform.startswith("win"):
+        options["Windows DirectShow"] = cv2.CAP_DSHOW
+        options["Windows Media Foundation"] = cv2.CAP_MSMF
+    return options
 
 
 def _render_reference_loader() -> None:
     with st.expander("Reference image", expanded=True):
-        col_upload, col_path = st.columns([1, 1])
+        col_folder, col_upload, col_path = st.columns([1.2, 1, 1])
+        with col_folder:
+            _render_reference_folder_picker()
         with col_upload:
             uploaded = st.file_uploader(
                 "Upload reference image",
                 type=["png", "jpg", "jpeg", "webp", "bmp"],
             )
             if uploaded is not None:
-                upload_key = (uploaded.name, uploaded.size)
-                if st.session_state.reference_upload_key != upload_key:
-                    image = Image.open(uploaded).convert("RGB")
-                    st.session_state.reference_image = np.asarray(image)
-                    st.session_state.reference_name = uploaded.name
-                    st.session_state.reference_upload_key = upload_key
-                    _reset_annotation("ref")
+                source_key = ("upload", uploaded.name, uploaded.size)
+                if st.session_state.reference_source_key != source_key:
+                    with Image.open(uploaded) as image:
+                        _set_reference_image(np.asarray(image.convert("RGB")), uploaded.name, source_key)
         with col_path:
             path_text = st.text_input("Or load image path", placeholder="/path/to/reference.png")
             if st.button("Load reference path", use_container_width=True) and path_text:
                 try:
-                    st.session_state.reference_image = load_rgb_image(Path(path_text))
-                    st.session_state.reference_name = str(Path(path_text).expanduser())
-                    st.session_state.reference_upload_key = None
-                    _reset_annotation("ref")
+                    _load_reference_from_path(Path(path_text))
                 except Exception as exc:
                     st.error(str(exc))
 
@@ -195,6 +219,104 @@ def _render_reference_loader() -> None:
         if reference is not None:
             name = st.session_state.get("reference_name") or "reference"
             st.caption(f"{name} | {reference.shape[1]} x {reference.shape[0]} px")
+
+
+def _render_reference_folder_picker() -> None:
+    folder_text = st.text_input(
+        "Reference folder",
+        key="reference_folder_text",
+        help="Server-side folder to scan for reusable reference images.",
+    )
+    recursive = st.checkbox("Include subfolders", key="reference_folder_recursive")
+    if not folder_text.strip():
+        st.info("Enter a folder path to list reusable reference images.")
+        return
+
+    folder = _resolve_user_path(folder_text)
+    if not folder.exists():
+        st.info(f"Folder not found: {folder}")
+        return
+    if not folder.is_dir():
+        st.warning(f"Not a folder: {folder}")
+        return
+
+    image_paths = _list_reference_images(folder, recursive)
+    if not image_paths:
+        st.info("No supported images found in this folder.")
+        return
+
+    options = [""] + [str(path) for path in image_paths]
+    selection_key = "reference_folder_selection"
+    if st.session_state.get(selection_key) not in options:
+        st.session_state[selection_key] = ""
+
+    selected_value = st.selectbox(
+        "Choose reference image",
+        options,
+        format_func=lambda value: _format_reference_choice(value, folder),
+        key=selection_key,
+    )
+    if not selected_value:
+        return
+
+    try:
+        _load_reference_from_path(Path(selected_value))
+    except Exception as exc:
+        st.error(str(exc))
+
+
+def _resolve_user_path(path_text: str) -> Path:
+    path = Path(path_text.strip()).expanduser()
+    if path.is_absolute():
+        return path
+    return Path.cwd() / path
+
+
+def _list_reference_images(folder: Path, recursive: bool) -> list[Path]:
+    paths = folder.rglob("*") if recursive else folder.iterdir()
+    return sorted(
+        (
+            path
+            for path in paths
+            if path.is_file() and path.suffix.lower() in REFERENCE_IMAGE_EXTENSIONS
+        ),
+        key=lambda path: str(path).lower(),
+    )
+
+
+def _format_reference_choice(value: str, folder: Path) -> str:
+    if not value:
+        return "Select an image..."
+    path = Path(value)
+    try:
+        return str(path.relative_to(folder))
+    except ValueError:
+        return path.name
+
+
+def _load_reference_from_path(path: Path) -> None:
+    resolved = _resolve_user_path(str(path))
+    source_key = _reference_path_source_key(resolved)
+    if st.session_state.get("reference_source_key") == source_key:
+        return
+    _set_reference_image(load_rgb_image(resolved), str(resolved), source_key)
+
+
+def _reference_path_source_key(path: Path) -> tuple[str, str, int, int]:
+    resolved = path.resolve(strict=False)
+    stat = resolved.stat()
+    return ("path", str(resolved), stat.st_mtime_ns, stat.st_size)
+
+
+def _set_reference_image(
+    image: np.ndarray,
+    name: str,
+    source_key: tuple[str, str, int] | tuple[str, str, int, int],
+) -> None:
+    st.session_state.reference_image = image
+    st.session_state.reference_name = name
+    st.session_state.reference_source_key = source_key
+    _reset_annotation("ref")
 
 
 def _render_camera_controls(config: CameraConfig) -> None:
@@ -210,7 +332,7 @@ def _render_camera_controls(config: CameraConfig) -> None:
             if st.button("Capture current frame", use_container_width=True):
                 _capture_current_frame(config)
 
-        if st.session_state.camera_running:
+        if st.session_state.camera_running and not _should_pause_live_refresh_for_annotation():
             try:
                 frame = read_rgb_frame(st.session_state.cap)
                 st.session_state.live_frame = frame
@@ -229,44 +351,78 @@ def _render_live_panel(live_frame: np.ndarray | None, reference: np.ndarray | No
         st.info("Start the camera to show the live feed.")
         return
 
-    ref_bbox = st.session_state.get("ref_roi")
+    ref_bbox = _roi_for_shape("ref", live_frame.shape) if reference is not None else None
     real_bbox = _roi_for_shape("real", live_frame.shape)
-    ref_points = _points_for_shape("ref", reference.shape) if reference is not None else []
+    ref_points = _points_for_shape("ref", live_frame.shape) if reference is not None else []
     real_points = _points_for_shape("real", live_frame.shape)
+    st.caption(f"Reference corners: {len(ref_points)}/4 | Live real corners: {len(real_points)}/4")
     enable_live_roi = st.checkbox(
         "Enable live real ROI",
         key="live_roi_enabled",
-        help="Drag a real-object box directly on the live camera preview.",
+        help="Draw a bbox or click four real-object corners directly on the live camera preview.",
     )
+    live_tool = None
+    if enable_live_roi:
+        live_tool = st.radio(
+            "Live annotation tool",
+            ["Drag bbox", "Click 4 corners"],
+            index=1,
+            horizontal=True,
+            key="live_annotation_tool",
+        )
+        st.checkbox(
+            "Pause live until 4 corners are set",
+            key="freeze_live_while_annotating",
+            help="Keeps the image still while selecting corners, then live preview resumes after all 4 points are set.",
+        )
 
+    _render_live_match_status(reference, live_frame, ref_bbox, real_bbox, enable_live_roi)
     frame = _live_overlay_image(live_frame, reference, ref_bbox, real_bbox, ref_points, real_points)
 
-    if enable_live_roi:
+    if enable_live_roi and live_tool == "Click 4 corners":
+        _live_corner_point_editor(frame, live_frame.shape)
+    elif enable_live_roi:
         _live_bbox_editor(frame, live_frame.shape)
     else:
         st.image(frame, channels="RGB", use_container_width=True)
 
-    real_bbox = _roi_for_shape("real", live_frame.shape)
 
-    if reference is not None and ref_bbox is not None and real_bbox is not None:
-        live_ref_bbox = scale_bbox(ref_bbox, reference.shape, live_frame.shape)
-        intersection_area, union_area, iou = compute_bbox_iou(live_ref_bbox, real_bbox)
-        overlap_percent = _format_percent(iou)
-        st.metric("Live overlap", overlap_percent)
-        st.caption(
-            f"Overlap percentage: {overlap_percent} | "
-            f"intersection={intersection_area}px | union={union_area}px"
-        )
-        st.caption("Using the real ROI from ROI selection. You can redraw it there or use live real ROI.")
-    elif reference is not None and ref_bbox is not None and enable_live_roi:
-        st.metric("Live overlap", "waiting for real ROI")
-        st.info("Drag here, or draw the real ROI in ROI selection below, to show overlap percentage.")
-    elif reference is not None and ref_bbox is not None:
-        st.metric("Live overlap", "waiting for real ROI")
-        st.info(
-            "Live video is streaming. Draw the real ROI in ROI selection below, "
-            "or enable live real ROI to draw it here."
-        )
+def _render_live_match_status(
+    reference: np.ndarray | None,
+    live_frame: np.ndarray,
+    ref_bbox: BoundingBox | None,
+    real_bbox: BoundingBox | None,
+    enable_live_roi: bool,
+) -> None:
+    col_score, col_intersection, col_union = st.columns(3)
+
+    if reference is None:
+        col_score.metric("Live match percentage", "N/A")
+        col_intersection.metric("Intersection", "N/A")
+        col_union.metric("Union", "N/A")
+        st.caption("Missing: reference image.")
+        return
+    if ref_bbox is None:
+        col_score.metric("Live match percentage", "N/A")
+        col_intersection.metric("Intersection", "N/A")
+        col_union.metric("Union", "N/A")
+        st.caption("Missing: reference ROI. Enable ROI in Reference object ROI and click 4 corners.")
+        return
+    if real_bbox is None:
+        col_score.metric("Live match percentage", "N/A")
+        col_intersection.metric("Intersection", "N/A")
+        col_union.metric("Union", "N/A")
+        if enable_live_roi:
+            st.caption("Missing: live real ROI. Click 4 live corners to calculate the percentage.")
+        else:
+            st.caption("Missing: live real ROI. Enable live real ROI first.")
+        return
+
+    intersection_area, union_area, iou = compute_bbox_iou(ref_bbox, real_bbox)
+    overlap_percent = _format_percent(iou)
+    col_score.metric("Live match percentage", overlap_percent)
+    col_intersection.metric("Intersection", f"{intersection_area}px")
+    col_union.metric("Union", f"{union_area}px")
 
 
 def _live_overlay_image(
@@ -279,19 +435,30 @@ def _live_overlay_image(
 ) -> np.ndarray:
     frame = live_frame
 
-    if st.session_state.get("overlay_ref_live") and reference is not None and ref_bbox is not None:
-        scaled_ref = scale_bbox(ref_bbox, reference.shape, frame.shape)
-        frame = overlay_bboxes(frame, scaled_ref, None)
+    show_reference_overlay = (
+        st.session_state.get("overlay_ref_live")
+        and ref_bbox is not None
+        and len(ref_points) == 4
+        and len(real_points) == 4
+    )
 
-    if st.session_state.get("overlay_ref_live") and reference is not None and len(ref_points) == 4:
-        scaled_points = scale_points(ref_points, reference.shape, frame.shape)
-        frame = draw_points_polygon(frame, scaled_points, REF_COLOR, "reference corners")
+    if show_reference_overlay:
+        frame = overlay_bboxes(frame, ref_bbox, None)
+
+    if show_reference_overlay:
+        frame = draw_points_polygon(frame, ref_points, REF_COLOR, "reference corners")
 
     if real_bbox is not None:
         frame = draw_bbox(frame, real_bbox, REAL_COLOR, "real ROI")
 
-    if len(real_points) == 4:
-        frame = draw_points_polygon(frame, real_points, REAL_COLOR, "real corners")
+    if real_points:
+        frame = draw_points_polygon(
+            frame,
+            real_points,
+            REAL_COLOR,
+            "real corners",
+            closed=len(real_points) >= 4,
+        )
 
     return frame
 
@@ -311,6 +478,7 @@ def _live_bbox_editor(frame: np.ndarray, live_shape: tuple[int, ...]) -> None:
         selected = _bbox_from_drag_event(event, scale, live_shape)
         if selected is not None:
             _store_roi("real", selected, live_shape)
+            _store_points_only("real", [], live_shape)
             st.session_state.real_roi_enabled = True
             st.rerun()
 
@@ -319,233 +487,106 @@ def _live_bbox_editor(frame: np.ndarray, live_shape: tuple[int, ...]) -> None:
         st.caption("Drag over the live object to set/update the green real ROI.")
     with col_clear:
         if st.button("Clear live ROI", use_container_width=True):
-            st.session_state.real_roi = None
-            st.session_state.real_roi_shape = None
-            st.session_state.real_roi_enabled = False
+            _clear_live_real_annotation()
             st.rerun()
 
 
-def _render_roi_panels(reference: np.ndarray | None, real_frame: np.ndarray | None) -> None:
-    st.subheader("ROI selection")
-    col_ref, col_real = st.columns(2)
-    with col_ref:
-        _roi_editor("Reference object ROI", reference, "ref")
-    with col_real:
-        _roi_editor("Real captured object ROI", real_frame, "real")
+def _live_corner_point_editor(frame: np.ndarray, live_shape: tuple[int, ...]) -> None:
+    points = _points_for_shape("real", live_shape)
+    display, scale = _resize_for_annotation(frame, MAX_LIVE_ANNOTATION_WIDTH)
+
+    col_undo, col_clear = st.columns(2)
+    with col_undo:
+        if st.button("Undo last live point", use_container_width=True):
+            _store_live_real_points(points[:-1], live_shape)
+            st.rerun()
+    with col_clear:
+        if st.button("Clear live points", use_container_width=True):
+            _clear_live_real_annotation()
+            st.rerun()
+
+    event = streamlit_image_coordinates(
+        display,
+        width=display.shape[1],
+        height=display.shape[0],
+        click_and_drag=False,
+        key="live_corner_click",
+        cursor="crosshair",
+    )
+
+    if _is_new_event("live", "point", event) and event is not None:
+        point = _point_from_click_event(event, scale, live_shape)
+        if point is not None:
+            next_points = points + [point]
+            if len(next_points) > 4:
+                next_points = [point]
+            _store_live_real_points(next_points, live_shape)
+            st.session_state.real_roi_enabled = True
+            st.rerun()
+
+    st.caption(
+        "Click live corners in order: top-left, top-right, bottom-right, bottom-left. "
+        f"{len(points)}/4 set."
+    )
+    if points:
+        st.dataframe(
+            [
+                {"index": index + 1, "x": round(point[0], 1), "y": round(point[1], 1)}
+                for index, point in enumerate(points)
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+
+
+def _render_reference_roi_panel(
+    reference: np.ndarray | None,
+    live_frame: np.ndarray | None,
+) -> None:
+    st.subheader("Reference ROI")
+    reference_for_roi = _reference_image_for_roi(reference, live_frame)
+    if reference is not None and live_frame is None:
+        st.info("Start the camera first. The reference image will be resized to the live camera size before ROI selection.")
+        st.image(reference, channels="RGB", use_container_width=True)
+        return
+
+    if reference_for_roi is not None and live_frame is not None:
+        _reset_ref_annotation_if_shape_changed(reference_for_roi.shape)
+        st.caption(
+            "Reference image resized for ROI: "
+            f"{reference_for_roi.shape[1]} x {reference_for_roi.shape[0]} px "
+            "(same size as live camera)."
+        )
+
+    _roi_editor("Reference object ROI", reference_for_roi, "ref")
 
     with st.expander("Optional segmentation interface", expanded=False):
         segmenter = _render_segmentation_settings()
-        col_ref_seg, col_real_seg = st.columns(2)
-        with col_ref_seg:
-            if st.button("Create reference mask from ROI", use_container_width=True):
-                _create_mask_from_roi("ref", reference, segmenter)
-        with col_real_seg:
-            if st.button("Create real mask from ROI", use_container_width=True):
-                _create_mask_from_roi("real", real_frame, segmenter)
+        if st.button("Create reference mask from ROI", use_container_width=True):
+            _create_mask_from_roi("ref", reference_for_roi, segmenter)
 
 
-def _render_alignment_panel(reference: np.ndarray | None, real_frame: np.ndarray | None) -> None:
-    st.subheader("Alignment metrics")
-    ref_bbox = st.session_state.get("ref_roi")
-    real_bbox = _roi_for_shape("real", real_frame.shape) if real_frame is not None else None
-    ref_points = _points_for_shape("ref", reference.shape) if reference is not None else []
-    real_points = _points_for_shape("real", real_frame.shape) if real_frame is not None else []
-
-    if reference is None or real_frame is None:
-        st.info("Load a reference image and capture a real frame.")
-        return
-    if ref_bbox is None or real_bbox is None:
-        st.info("Select ROI on both the reference image and the captured real frame.")
-        return
-
-    metric_ref_bbox = ref_bbox
-    if st.session_state.get("normalize_bbox") and reference.shape[:2] != real_frame.shape[:2]:
-        metric_ref_bbox = scale_bbox(ref_bbox, reference.shape, real_frame.shape)
-
-    metrics = compute_alignment(metric_ref_bbox, real_bbox)
-    _render_metric_status(metrics)
-    _render_metric_table(metrics)
-
-    metric_ref_points = ref_points
-    if ref_points and st.session_state.get("normalize_bbox") and reference.shape[:2] != real_frame.shape[:2]:
-        metric_ref_points = scale_points(ref_points, reference.shape, real_frame.shape)
-    if len(metric_ref_points) == 4 and len(real_points) == 4:
-        _render_corner_metrics(compute_corner_alignment(metric_ref_points, real_points))
-
-    _render_comparison_view(
-        reference,
-        real_frame,
-        ref_bbox,
-        metric_ref_bbox,
-        real_bbox,
-        ref_points,
-        metric_ref_points,
-        real_points,
-    )
+def _reference_image_for_roi(
+    reference: np.ndarray | None,
+    live_frame: np.ndarray | None,
+) -> np.ndarray | None:
+    if reference is None:
+        return None
+    if live_frame is None:
+        return reference
+    target_h, target_w = live_frame.shape[:2]
+    if reference.shape[:2] == (target_h, target_w):
+        return reference
+    interpolation = cv2.INTER_AREA if reference.shape[0] > target_h or reference.shape[1] > target_w else cv2.INTER_LINEAR
+    return cv2.resize(reference, (target_w, target_h), interpolation=interpolation)
 
 
-def _render_metric_status(metrics: AlignmentMetrics) -> None:
-    status = metrics.scale_status
-    if status == "within_5":
-        st.success(f"Scale alignment: within 5% ({metrics.max_size_error_pct:.2f}%)")
-    elif status == "within_10":
-        st.warning(f"Scale alignment: within 10% ({metrics.max_size_error_pct:.2f}%)")
-    else:
-        st.error(f"Scale alignment: outside 10% ({metrics.max_size_error_pct:.2f}%)")
-
-    if metrics.iou >= 0.75:
-        st.success(f"BBox overlap: {_format_percent(metrics.iou)}")
-    elif metrics.iou >= 0.5:
-        st.warning(f"BBox overlap: {_format_percent(metrics.iou)}")
-    else:
-        st.error(f"BBox overlap: {_format_percent(metrics.iou)}")
-
-    if st.session_state.get("guide_mode") == "Scale + center":
-        st.caption(
-            "Center offset: "
-            f"dx={metrics.center_dx_px:.1f}px, "
-            f"dy={metrics.center_dy_px:.1f}px, "
-            f"distance={metrics.center_distance_px:.1f}px"
-        )
-
-
-def _render_metric_table(metrics: AlignmentMetrics) -> None:
-    rows = [
-        {
-            "metric": "width",
-            "reference_px": metrics.ref_bbox.width,
-            "real_px": metrics.real_bbox.width,
-            "signed_error_px": metrics.width_error_px,
-            "abs_error_pct": f"{metrics.width_error_pct:.2f}%",
-        },
-        {
-            "metric": "height",
-            "reference_px": metrics.ref_bbox.height,
-            "real_px": metrics.real_bbox.height,
-            "signed_error_px": metrics.height_error_px,
-            "abs_error_pct": f"{metrics.height_error_pct:.2f}%",
-        },
-        {
-            "metric": "area",
-            "reference_px": metrics.ref_bbox.area,
-            "real_px": metrics.real_bbox.area,
-            "signed_error_px": metrics.area_error_px,
-            "abs_error_pct": f"{metrics.area_error_pct:.2f}%",
-        },
-        {
-            "metric": "bbox_overlap",
-            "reference_px": f"intersection {metrics.intersection_area_px}",
-            "real_px": f"union {metrics.union_area_px}",
-            "signed_error_px": _format_percent(metrics.iou),
-            "abs_error_pct": _format_percent(metrics.iou),
-        },
-        {
-            "metric": "center_x",
-            "reference_px": f"{metrics.ref_bbox.center[0]:.1f}",
-            "real_px": f"{metrics.real_bbox.center[0]:.1f}",
-            "signed_error_px": f"{metrics.center_dx_px:.1f}",
-            "abs_error_pct": "",
-        },
-        {
-            "metric": "center_y",
-            "reference_px": f"{metrics.ref_bbox.center[1]:.1f}",
-            "real_px": f"{metrics.real_bbox.center[1]:.1f}",
-            "signed_error_px": f"{metrics.center_dy_px:.1f}",
-            "abs_error_pct": "",
-        },
-    ]
-    st.dataframe(rows, hide_index=True, use_container_width=True)
-
-
-def _render_corner_metrics(metrics: CornerAlignmentMetrics) -> None:
-    st.markdown("**Corner alignment**")
-    st.caption(
-        "Mean corner offset: "
-        f"{metrics.mean_distance_px:.1f}px | "
-        f"max: {metrics.max_distance_px:.1f}px | "
-        f"area error: {metrics.area_error_pct:.2f}% | "
-        f"center dx={metrics.center_dx_px:.1f}px, dy={metrics.center_dy_px:.1f}px"
-    )
-    rows = []
-    for index, (ref_point, real_point, offset, distance) in enumerate(
-        zip(metrics.ref_points, metrics.real_points, metrics.offsets, metrics.distances_px),
-        start=1,
-    ):
-        rows.append(
-            {
-                "corner": index,
-                "ref_x": f"{ref_point[0]:.1f}",
-                "ref_y": f"{ref_point[1]:.1f}",
-                "real_x": f"{real_point[0]:.1f}",
-                "real_y": f"{real_point[1]:.1f}",
-                "dx_px": f"{offset[0]:.1f}",
-                "dy_px": f"{offset[1]:.1f}",
-                "distance_px": f"{distance:.1f}",
-            }
-        )
-    st.dataframe(rows, hide_index=True, use_container_width=True)
-
-
-def _render_comparison_view(
-    reference: np.ndarray,
-    real_frame: np.ndarray,
-    ref_bbox: BoundingBox,
-    metric_ref_bbox: BoundingBox,
-    real_bbox: BoundingBox,
-    ref_points: list[Point],
-    metric_ref_points: list[Point],
-    real_points: list[Point],
-) -> None:
-    mode = st.radio("View mode", ["Side-by-side", "Overlay"], horizontal=True)
-    if mode == "Overlay":
-        alpha = st.slider("Reference alpha", min_value=0.0, max_value=1.0, value=0.35, step=0.05)
-        st.image(
-            draw_points_polygon(
-                draw_points_polygon(
-                    overlay_reference_image(reference, real_frame, alpha, ref_bbox, real_bbox),
-                    metric_ref_points,
-                    REF_COLOR,
-                    "reference corners",
-                ),
-                real_points,
-                REAL_COLOR,
-                "real corners",
-            ),
-            channels="RGB",
-            use_container_width=True,
-        )
-        return
-
-    col_ref, col_real = st.columns(2)
-    with col_ref:
-        st.image(
-            draw_points_polygon(
-                draw_bbox(reference, ref_bbox, REF_COLOR, "reference"),
-                ref_points,
-                REF_COLOR,
-                "reference corners",
-            ),
-            channels="RGB",
-            caption="Reference image",
-            use_container_width=True,
-        )
-    with col_real:
-        st.image(
-            draw_points_polygon(
-                draw_points_polygon(
-                    overlay_bboxes(real_frame, metric_ref_bbox, real_bbox),
-                    metric_ref_points,
-                    REF_COLOR,
-                    "reference corners",
-                ),
-                real_points,
-                REAL_COLOR,
-                "real corners",
-            ),
-            channels="RGB",
-            caption="Captured real frame",
-            use_container_width=True,
-        )
+def _reset_ref_annotation_if_shape_changed(image_shape: tuple[int, ...]) -> None:
+    for key in ("ref_roi_shape", "ref_points_shape"):
+        source_shape = st.session_state.get(key)
+        if source_shape is not None and source_shape[:2] != image_shape[:2]:
+            _reset_annotation("ref")
+            return
 
 
 def _roi_editor(title: str, image: np.ndarray | None, prefix: str) -> None:
@@ -576,7 +617,7 @@ def _roi_editor(title: str, image: np.ndarray | None, prefix: str) -> None:
     tool = st.radio(
         "Annotation tool",
         ["Drag bbox", "Click 4 corners", "Numeric / OpenCV"],
-        index=1 if prefix == "real" else 0,
+        index=1,
         horizontal=True,
         key=f"{prefix}_annotation_tool",
     )
@@ -949,12 +990,40 @@ def _store_roi(prefix: str, bbox: BoundingBox, image_shape: tuple[int, ...] | No
     st.session_state[f"{prefix}_roi_height"] = bbox.height
 
 
-def _store_points(prefix: str, points: list[Point], image_shape: tuple[int, ...]) -> None:
+def _store_points_only(
+    prefix: str,
+    points: list[Point],
+    image_shape: tuple[int, ...] | None,
+) -> None:
     st.session_state[f"{prefix}_points"] = points
-    st.session_state[f"{prefix}_points_shape"] = image_shape
+    st.session_state[f"{prefix}_points_shape"] = image_shape if points else None
+
+
+def _store_points(prefix: str, points: list[Point], image_shape: tuple[int, ...]) -> None:
+    _store_points_only(prefix, points, image_shape)
     bbox = bbox_from_points(points, image_shape)
     if bbox is not None:
         _store_roi(prefix, bbox, image_shape)
+
+
+def _store_live_real_points(points: list[Point], live_shape: tuple[int, ...]) -> None:
+    _store_points_only("real", points, live_shape)
+    if len(points) == 4:
+        bbox = bbox_from_points(points, live_shape)
+        if bbox is not None:
+            _store_roi("real", bbox, live_shape)
+        return
+
+    st.session_state.real_roi = None
+    st.session_state.real_roi_shape = None
+    st.session_state.real_roi_enabled = bool(points)
+
+
+def _clear_live_real_annotation() -> None:
+    st.session_state.real_roi = None
+    st.session_state.real_roi_shape = None
+    st.session_state.real_roi_enabled = False
+    _store_points_only("real", [], None)
 
 
 def _reset_annotation(prefix: str) -> None:
@@ -1009,11 +1078,25 @@ def _create_mask_from_roi(
 
 def _start_camera(config: CameraConfig) -> None:
     _stop_camera()
+    cap = None
     try:
-        st.session_state.cap = open_camera(config)
+        with st.spinner(f"Opening camera {config.source!r}..."):
+            cap = open_camera(config)
+            try:
+                st.session_state.live_frame = read_rgb_frame(cap)
+            except Exception as exc:
+                cap.release()
+                cap = None
+                raise RuntimeError(
+                    "Camera opened, but no frame was returned. Close other camera apps "
+                    "or try a different camera backend."
+                ) from exc
+        st.session_state.cap = cap
         st.session_state.camera_running = True
         st.success(f"Camera started: {config.source!r}")
     except Exception as exc:
+        if cap is not None:
+            cap.release()
         st.session_state.camera_running = False
         st.session_state.cap = None
         st.error(str(exc))
@@ -1036,13 +1119,14 @@ def _capture_current_frame(config: CameraConfig) -> None:
         return
 
     try:
-        cap = open_camera(config)
-        try:
-            st.session_state.real_frame = read_rgb_frame(cap)
-            _reset_annotation("real")
-            st.success("Captured one frame from camera.")
-        finally:
-            cap.release()
+        with st.spinner(f"Capturing from camera {config.source!r}..."):
+            cap = open_camera(config)
+            try:
+                st.session_state.real_frame = read_rgb_frame(cap)
+            finally:
+                cap.release()
+        _reset_annotation("real")
+        st.success("Captured one frame from camera.")
     except Exception as exc:
         st.error(str(exc))
 
@@ -1052,8 +1136,18 @@ def _maybe_rerun_live_preview() -> None:
         return
     if not st.session_state.get("live_preview"):
         return
-    if st.session_state.get("live_roi_enabled"):
+    if _should_pause_live_refresh_for_annotation():
         return
     fps = max(1, int(st.session_state.get("preview_fps", 5)))
     time.sleep(1.0 / fps)
     st.rerun()
+
+
+def _should_pause_live_refresh_for_annotation() -> bool:
+    if not st.session_state.get("live_roi_enabled"):
+        return False
+    if not st.session_state.get("freeze_live_while_annotating"):
+        return False
+    if st.session_state.get("live_annotation_tool") != "Click 4 corners":
+        return False
+    return len(st.session_state.get("real_points") or []) < 4

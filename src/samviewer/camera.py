@@ -15,6 +15,7 @@ class CameraConfig:
     source: CameraSource = 0
     width: int | None = 1280
     height: int | None = 720
+    backend: int | None = None
 
 
 def parse_camera_source(value: str) -> CameraSource:
@@ -25,7 +26,10 @@ def parse_camera_source(value: str) -> CameraSource:
 
 
 def open_camera(config: CameraConfig) -> cv2.VideoCapture:
-    cap = cv2.VideoCapture(config.source)
+    if config.backend is not None and isinstance(config.source, int):
+        cap = cv2.VideoCapture(config.source, config.backend)
+    else:
+        cap = cv2.VideoCapture(config.source)
     if config.width:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.width)
     if config.height:
@@ -51,10 +55,10 @@ def capture_frame(config: CameraConfig) -> np.ndarray:
         cap.release()
 
 
-def scan_camera_indices(max_index: int = 5) -> list[int]:
+def scan_camera_indices(max_index: int = 5, backend: int | None = None) -> list[int]:
     found: list[int] = []
     for index in range(max_index + 1):
-        cap = cv2.VideoCapture(index)
+        cap = cv2.VideoCapture(index, backend) if backend is not None else cv2.VideoCapture(index)
         try:
             if cap.isOpened():
                 ok, _ = cap.read()

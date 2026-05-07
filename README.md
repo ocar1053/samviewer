@@ -9,20 +9,16 @@ pixel size and center position across the two images.
 
 - OpenCV camera input from webcam, USB camera, video file, or URL.
 - Live camera preview with optional reference bbox overlay.
-- Live real-object ROI drawing on the camera preview with overlap percentage.
-- Reference image upload or path loading.
+- Live real-object bbox or four-corner ROI drawing on the camera preview with
+  overlap percentage.
+- Reference image folder picker, upload, or path loading.
 - Captured real frame snapshot.
-- Manual ROI selection for the reference object and the real object.
+- Manual ROI selection for the reference object.
 - Browser-based mouse annotation:
   - drag a bbox over the object
   - click four ordered table corners
 - OpenCV `selectROI` window when a desktop GUI is available.
 - Numeric ROI fallback for remote or headless environments.
-- Pixel metrics for bbox width, height, area, center, size error, and center
-  offset.
-- Corner metrics for four corresponding points, including per-corner offset,
-  mean/max offset, polygon area error, and center offset.
-- Side-by-side view and blended overlay view.
 - Optional segmentation backend. The default bbox-mask fallback has no extra
   dependencies; SAM2 can be enabled separately and used with a box prompt.
 
@@ -48,42 +44,56 @@ cd /home/ocarpan/samviewer
 streamlit run main.py
 ```
 
+On Windows, prefer running Streamlit through the project's virtual environment:
+
+```powershell
+.\.venv\Scripts\python -m streamlit run main.py
+```
+
 Then open the URL printed by Streamlit, usually `http://localhost:8501`.
 
 ## Basic Workflow
 
 1. Choose camera source `0`, `1`, `2`, or a custom path/URL.
 2. Click **Start camera**.
-3. Load a reference image.
-4. Click **Capture current frame**.
-5. Enable ROI for the reference image and select the table.
-6. Enable ROI for the captured real frame and click the four real table corners
-   in order: top-left, top-right, bottom-right, bottom-left.
-7. Use the live overlap percentage and reference bbox overlay while moving the physical
+3. Load a reference image. Put reusable images in `reference_images/` and choose
+   one from the folder picker, or upload / load a path manually.
+4. In **Reference ROI**, click the four reference corners. Once the camera is
+   running, the reference image is resized to the same pixel size as the live
+   camera frame before annotation.
+5. In **Live camera**, enable **Live real ROI** and choose either **Drag bbox**
+   or **Click 4 corners**.
+6. Use the live matching percentage and reference bbox overlay while moving the physical
    camera.
+
+## Windows Camera Troubleshooting
+
+- Use camera source `0` first. If needed, click **Scan camera indices**.
+- Use **Windows DirectShow** as the camera backend. It is the default on Windows.
+- Close apps that may already hold the camera, such as Windows Camera, Teams,
+  Zoom, OBS, or browser webcam tabs.
+- If **Start camera** appears stuck, lower the capture resolution, then try again.
+- Make sure Windows allows desktop apps to use the camera in
+  **Settings > Privacy & security > Camera**.
 
 ## Mouse Annotation
 
-Each reference/real panel has three annotation tools:
+The reference ROI panel has three annotation tools:
 
 - **Drag bbox**: drag over the target object to set the bbox.
 - **Click 4 corners**: click the object corners in order: top-left, top-right,
   bottom-right, bottom-left. The app draws a quadrilateral and uses its tight
-  bbox for the basic pixel-size metrics.
+  bbox for live matching.
 - **Numeric / OpenCV**: edit bbox numbers directly or use OpenCV `selectROI`.
 
-When both reference and real images have four corners, the app also reports
-corner offsets and polygon area error. This is useful for table-top alignment
-because it compares the visible table plane more directly than a plain bbox.
-The real ROI panel defaults to **Click 4 corners** so the live preview can use
-the tight bbox from those four points for overlap percentage.
+The live camera panel also defaults to **Click 4 corners** for the real object.
+When both reference and live real ROIs are set, the app shows the live match
+percentage above the live image.
 
 ## Notes
 
-- For true pixel-size comparison, use the same resolution for the rendered
-  reference image and the camera frame whenever possible.
-- If the image resolutions differ, the UI can normalize the reference bbox into
-  the real frame coordinate system for metric calculation and overlay.
+- The app resizes the reference image to the live camera frame size before ROI
+  selection, so reference and live ROIs use the same pixel coordinate system.
 - `OpenCV selectROI` opens a native desktop window. If the app runs on a remote
   server without GUI forwarding, use the numeric ROI controls instead.
 
@@ -118,12 +128,11 @@ In the viewer:
 2. Choose **SAM2**.
 3. Use `facebook/sam2.1-hiera-tiny` for the lightest Hugging Face option, or
    choose a local config + checkpoint.
-4. Select an ROI first, then click **Create reference mask from ROI** or
-   **Create real mask from ROI**.
+4. Select a reference ROI first, then click **Create reference mask from ROI**.
 
 The app uses your selected ROI as SAM2's box prompt, chooses the highest-scoring
 mask, computes a tight bbox from that mask, and updates the ROI used by the
-alignment metrics.
+live matching.
 
 ## Future Extensions
 
