@@ -38,6 +38,9 @@ class BoundingBox:
 class AlignmentMetrics:
     ref_bbox: BoundingBox
     real_bbox: BoundingBox
+    intersection_area_px: int
+    union_area_px: int
+    iou: float
     width_error_px: int
     height_error_px: int
     area_error_px: int
@@ -158,6 +161,20 @@ def _pct_error(real_value: float, ref_value: float) -> float:
     return abs(real_value - ref_value) / abs(ref_value) * 100.0
 
 
+def compute_bbox_iou(first_bbox: BoundingBox, second_bbox: BoundingBox) -> tuple[int, int, float]:
+    intersection_left = max(first_bbox.x, second_bbox.x)
+    intersection_top = max(first_bbox.y, second_bbox.y)
+    intersection_right = min(first_bbox.right, second_bbox.right)
+    intersection_bottom = min(first_bbox.bottom, second_bbox.bottom)
+
+    intersection_width = max(0, intersection_right - intersection_left)
+    intersection_height = max(0, intersection_bottom - intersection_top)
+    intersection_area = intersection_width * intersection_height
+    union_area = first_bbox.area + second_bbox.area - intersection_area
+    iou = intersection_area / union_area if union_area > 0 else 0.0
+    return intersection_area, union_area, iou
+
+
 def compute_alignment(ref_bbox: BoundingBox, real_bbox: BoundingBox) -> AlignmentMetrics:
     ref_cx, ref_cy = ref_bbox.center
     real_cx, real_cy = real_bbox.center
@@ -168,10 +185,14 @@ def compute_alignment(ref_bbox: BoundingBox, real_bbox: BoundingBox) -> Alignmen
     area_error = real_bbox.area - ref_bbox.area
     width_error_pct = _pct_error(real_bbox.width, ref_bbox.width)
     height_error_pct = _pct_error(real_bbox.height, ref_bbox.height)
+    intersection_area, union_area, iou = compute_bbox_iou(ref_bbox, real_bbox)
 
     return AlignmentMetrics(
         ref_bbox=ref_bbox,
         real_bbox=real_bbox,
+        intersection_area_px=intersection_area,
+        union_area_px=union_area,
+        iou=iou,
         width_error_px=width_error,
         height_error_px=height_error,
         area_error_px=area_error,

@@ -26,6 +26,7 @@ from samviewer.metrics import (
     bbox_to_mapping,
     clamp_bbox,
     compute_alignment,
+    compute_bbox_iou,
     compute_corner_alignment,
     scale_points,
     scale_bbox,
@@ -127,8 +128,8 @@ def _render_sidebar() -> CameraConfig:
             source_text = source_choice
         st.session_state.camera_source_text = source_text
 
-        width = st.number_input("Capture width", min_value=0, value=1280, step=160)
-        height = st.number_input("Capture height", min_value=0, value=720, step=90)
+        width = st.number_input("Capture width", min_value=0, value=1920, step=160)
+        height = st.number_input("Capture height", min_value=0, value=1080, step=90)
         st.checkbox("Live preview", key="live_preview", value=True)
         st.slider("Preview FPS", min_value=1, max_value=15, value=5, key="preview_fps")
 
@@ -233,6 +234,12 @@ def _render_live_panel(live_frame: np.ndarray | None, reference: np.ndarray | No
 
     st.image(frame, channels="RGB", use_container_width=True)
 
+    if reference is not None and ref_bbox is not None and real_bbox is not None:
+        live_ref_bbox = scale_bbox(ref_bbox, reference.shape, frame.shape)
+        intersection_area, union_area, iou = compute_bbox_iou(live_ref_bbox, real_bbox)
+        st.metric("Live bbox IoU", f"{iou:.3f}")
+        st.caption(f"Intersection={intersection_area}px | union={union_area}px")
+
 
 def _render_roi_panels(reference: np.ndarray | None, real_frame: np.ndarray | None) -> None:
     st.subheader("ROI selection")
@@ -302,6 +309,13 @@ def _render_metric_status(metrics: AlignmentMetrics) -> None:
     else:
         st.error(f"Scale alignment: outside 10% ({metrics.max_size_error_pct:.2f}%)")
 
+    if metrics.iou >= 0.75:
+        st.success(f"BBox IoU: {metrics.iou:.3f}")
+    elif metrics.iou >= 0.5:
+        st.warning(f"BBox IoU: {metrics.iou:.3f}")
+    else:
+        st.error(f"BBox IoU: {metrics.iou:.3f}")
+
     if st.session_state.get("guide_mode") == "Scale + center":
         st.caption(
             "Center offset: "
@@ -333,6 +347,13 @@ def _render_metric_table(metrics: AlignmentMetrics) -> None:
             "real_px": metrics.real_bbox.area,
             "signed_error_px": metrics.area_error_px,
             "abs_error_pct": f"{metrics.area_error_pct:.2f}%",
+        },
+        {
+            "metric": "bbox_iou",
+            "reference_px": f"intersection {metrics.intersection_area_px}",
+            "real_px": f"union {metrics.union_area_px}",
+            "signed_error_px": f"{metrics.iou:.3f}",
+            "abs_error_pct": f"{metrics.iou * 100.0:.1f}%",
         },
         {
             "metric": "center_x",
@@ -557,6 +578,7 @@ def _corner_point_editor(image: np.ndarray, prefix: str) -> None:
 
 def _numeric_bbox_editor(title: str, image: np.ndarray, prefix: str) -> None:
     h, w = image.shape[:2]
+    roi_key = f"{prefix}_roi"
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         if st.button("Centered ROI", key=f"{prefix}_centered", use_container_width=True):
