@@ -44,6 +44,11 @@ from samviewer.visualization import (
 
 
 MAX_ANNOTATION_WIDTH = 640
+MAX_LIVE_ANNOTATION_WIDTH = 960
+
+
+def _format_percent(value: float) -> str:
+    return f"{value * 100.0:.1f}%"
 
 
 def main() -> None:
@@ -89,12 +94,20 @@ def _init_state() -> None:
         "reference_upload_key": None,
         "ref_roi": None,
         "real_roi": None,
+        "ref_roi_shape": None,
+        "real_roi_shape": None,
         "ref_roi_enabled": False,
         "real_roi_enabled": False,
         "ref_mask": None,
         "real_mask": None,
         "ref_points": [],
         "real_points": [],
+        "ref_points_shape": None,
+        "real_points_shape": None,
+        "live_roi_enabled": False,
+        "live_last_bbox_event": None,
+        "ref_annotation_tool": "Drag bbox",
+        "real_annotation_tool": "Click 4 corners",
         "ref_last_bbox_event": None,
         "real_last_bbox_event": None,
         "ref_last_point_event": None,
@@ -216,10 +229,55 @@ def _render_live_panel(live_frame: np.ndarray | None, reference: np.ndarray | No
         st.info("Start the camera to show the live feed.")
         return
 
-    frame = live_frame
     ref_bbox = st.session_state.get("ref_roi")
-    real_bbox = st.session_state.get("real_roi")
-    ref_points = st.session_state.get("ref_points") or []
+    real_bbox = _roi_for_shape("real", live_frame.shape)
+    ref_points = _points_for_shape("ref", reference.shape) if reference is not None else []
+    real_points = _points_for_shape("real", live_frame.shape)
+    enable_live_roi = st.checkbox(
+        "Enable live real ROI",
+        key="live_roi_enabled",
+        help="Drag a real-object box directly on the live camera preview.",
+    )
+
+    frame = _live_overlay_image(live_frame, reference, ref_bbox, real_bbox, ref_points, real_points)
+
+    if enable_live_roi:
+        _live_bbox_editor(frame, live_frame.shape)
+    else:
+        st.image(frame, channels="RGB", use_container_width=True)
+
+    real_bbox = _roi_for_shape("real", live_frame.shape)
+
+    if reference is not None and ref_bbox is not None and real_bbox is not None:
+        live_ref_bbox = scale_bbox(ref_bbox, reference.shape, live_frame.shape)
+        intersection_area, union_area, iou = compute_bbox_iou(live_ref_bbox, real_bbox)
+        overlap_percent = _format_percent(iou)
+        st.metric("Live overlap", overlap_percent)
+        st.caption(
+            f"Overlap percentage: {overlap_percent} | "
+            f"intersection={intersection_area}px | union={union_area}px"
+        )
+        st.caption("Using the real ROI from ROI selection. You can redraw it there or use live real ROI.")
+    elif reference is not None and ref_bbox is not None and enable_live_roi:
+        st.metric("Live overlap", "waiting for real ROI")
+        st.info("Drag here, or draw the real ROI in ROI selection below, to show overlap percentage.")
+    elif reference is not None and ref_bbox is not None:
+        st.metric("Live overlap", "waiting for real ROI")
+        st.info(
+            "Live video is streaming. Draw the real ROI in ROI selection below, "
+            "or enable live real ROI to draw it here."
+        )
+
+
+def _live_overlay_image(
+    live_frame: np.ndarray,
+    reference: np.ndarray | None,
+    ref_bbox: BoundingBox | None,
+    real_bbox: BoundingBox | None,
+    ref_points: list[Point],
+    real_points: list[Point],
+) -> np.ndarray:
+    frame = live_frame
 
     if st.session_state.get("overlay_ref_live") and reference is not None and ref_bbox is not None:
         scaled_ref = scale_bbox(ref_bbox, reference.shape, frame.shape)
@@ -232,13 +290,39 @@ def _render_live_panel(live_frame: np.ndarray | None, reference: np.ndarray | No
     if real_bbox is not None:
         frame = draw_bbox(frame, real_bbox, REAL_COLOR, "real ROI")
 
-    st.image(frame, channels="RGB", use_container_width=True)
+    if len(real_points) == 4:
+        frame = draw_points_polygon(frame, real_points, REAL_COLOR, "real corners")
 
-    if reference is not None and ref_bbox is not None and real_bbox is not None:
-        live_ref_bbox = scale_bbox(ref_bbox, reference.shape, frame.shape)
-        intersection_area, union_area, iou = compute_bbox_iou(live_ref_bbox, real_bbox)
-        st.metric("Live bbox IoU", f"{iou:.3f}")
-        st.caption(f"Intersection={intersection_area}px | union={union_area}px")
+    return frame
+
+
+def _live_bbox_editor(frame: np.ndarray, live_shape: tuple[int, ...]) -> None:
+    display, scale = _resize_for_annotation(frame, MAX_LIVE_ANNOTATION_WIDTH)
+    event = streamlit_image_coordinates(
+        display,
+        width=display.shape[1],
+        height=display.shape[0],
+        click_and_drag=True,
+        key="live_bbox_drag",
+        cursor="crosshair",
+    )
+
+    if _is_new_event("live", "bbox", event) and event is not None:
+        selected = _bbox_from_drag_event(event, scale, live_shape)
+        if selected is not None:
+            _store_roi("real", selected, live_shape)
+            st.session_state.real_roi_enabled = True
+            st.rerun()
+
+    col_hint, col_clear = st.columns([3, 1])
+    with col_hint:
+        st.caption("Drag over the live object to set/update the green real ROI.")
+    with col_clear:
+        if st.button("Clear live ROI", use_container_width=True):
+            st.session_state.real_roi = None
+            st.session_state.real_roi_shape = None
+            st.session_state.real_roi_enabled = False
+            st.rerun()
 
 
 def _render_roi_panels(reference: np.ndarray | None, real_frame: np.ndarray | None) -> None:
@@ -263,9 +347,9 @@ def _render_roi_panels(reference: np.ndarray | None, real_frame: np.ndarray | No
 def _render_alignment_panel(reference: np.ndarray | None, real_frame: np.ndarray | None) -> None:
     st.subheader("Alignment metrics")
     ref_bbox = st.session_state.get("ref_roi")
-    real_bbox = st.session_state.get("real_roi")
-    ref_points = st.session_state.get("ref_points") or []
-    real_points = st.session_state.get("real_points") or []
+    real_bbox = _roi_for_shape("real", real_frame.shape) if real_frame is not None else None
+    ref_points = _points_for_shape("ref", reference.shape) if reference is not None else []
+    real_points = _points_for_shape("real", real_frame.shape) if real_frame is not None else []
 
     if reference is None or real_frame is None:
         st.info("Load a reference image and capture a real frame.")
@@ -310,11 +394,11 @@ def _render_metric_status(metrics: AlignmentMetrics) -> None:
         st.error(f"Scale alignment: outside 10% ({metrics.max_size_error_pct:.2f}%)")
 
     if metrics.iou >= 0.75:
-        st.success(f"BBox IoU: {metrics.iou:.3f}")
+        st.success(f"BBox overlap: {_format_percent(metrics.iou)}")
     elif metrics.iou >= 0.5:
-        st.warning(f"BBox IoU: {metrics.iou:.3f}")
+        st.warning(f"BBox overlap: {_format_percent(metrics.iou)}")
     else:
-        st.error(f"BBox IoU: {metrics.iou:.3f}")
+        st.error(f"BBox overlap: {_format_percent(metrics.iou)}")
 
     if st.session_state.get("guide_mode") == "Scale + center":
         st.caption(
@@ -349,11 +433,11 @@ def _render_metric_table(metrics: AlignmentMetrics) -> None:
             "abs_error_pct": f"{metrics.area_error_pct:.2f}%",
         },
         {
-            "metric": "bbox_iou",
+            "metric": "bbox_overlap",
             "reference_px": f"intersection {metrics.intersection_area_px}",
             "real_px": f"union {metrics.union_area_px}",
-            "signed_error_px": f"{metrics.iou:.3f}",
-            "abs_error_pct": f"{metrics.iou * 100.0:.1f}%",
+            "signed_error_px": _format_percent(metrics.iou),
+            "abs_error_pct": _format_percent(metrics.iou),
         },
         {
             "metric": "center_x",
@@ -478,19 +562,21 @@ def _roi_editor(title: str, image: np.ndarray | None, prefix: str) -> None:
     if not enabled:
         st.image(image, channels="RGB", use_container_width=True)
         st.session_state[roi_key] = None
+        st.session_state[f"{prefix}_roi_shape"] = None
         return
 
-    current = st.session_state.get(roi_key)
+    current = _roi_for_shape(prefix, image.shape)
     if current is None:
         current = _centered_bbox(image)
-        _store_roi(prefix, current)
+        _store_roi(prefix, current, image.shape)
     else:
         current = clamp_bbox(current, image.shape)
-        _store_roi(prefix, current)
+        _store_roi(prefix, current, image.shape)
 
     tool = st.radio(
         "Annotation tool",
         ["Drag bbox", "Click 4 corners", "Numeric / OpenCV"],
+        index=1 if prefix == "real" else 0,
         horizontal=True,
         key=f"{prefix}_annotation_tool",
     )
@@ -521,7 +607,7 @@ def _mouse_bbox_editor(image: np.ndarray, prefix: str) -> None:
     if _is_new_event(prefix, "bbox", event) and event is not None:
         selected = _bbox_from_drag_event(event, scale, image.shape)
         if selected is not None:
-            _store_roi(prefix, selected)
+            _store_roi(prefix, selected, image.shape)
             st.rerun()
 
     st.caption("Drag over the object to set the bbox.")
@@ -530,8 +616,8 @@ def _mouse_bbox_editor(image: np.ndarray, prefix: str) -> None:
 
 
 def _corner_point_editor(image: np.ndarray, prefix: str) -> None:
-    points = list(st.session_state.get(f"{prefix}_points") or [])
-    bbox = bbox_from_points(points, image.shape) if points else st.session_state.get(f"{prefix}_roi")
+    points = _points_for_shape(prefix, image.shape)
+    bbox = bbox_from_points(points, image.shape) if points else _roi_for_shape(prefix, image.shape)
     annotated = _annotation_image(image, prefix, bbox=bbox, points=points)
     display, scale = _resize_for_annotation(annotated)
 
@@ -578,22 +664,21 @@ def _corner_point_editor(image: np.ndarray, prefix: str) -> None:
 
 def _numeric_bbox_editor(title: str, image: np.ndarray, prefix: str) -> None:
     h, w = image.shape[:2]
-    roi_key = f"{prefix}_roi"
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         if st.button("Centered ROI", key=f"{prefix}_centered", use_container_width=True):
-            _store_roi(prefix, _centered_bbox(image))
+            _store_roi(prefix, _centered_bbox(image), image.shape)
             st.rerun()
     with col_b:
         if st.button("Full image ROI", key=f"{prefix}_full", use_container_width=True):
-            _store_roi(prefix, BoundingBox(0, 0, w, h))
+            _store_roi(prefix, BoundingBox(0, 0, w, h), image.shape)
             st.rerun()
     with col_c:
         if st.button("OpenCV selectROI", key=f"{prefix}_opencv", use_container_width=True):
             try:
                 selected = _select_roi_with_opencv(image, title)
                 if selected is not None:
-                    _store_roi(prefix, clamp_bbox(selected, image.shape))
+                    _store_roi(prefix, clamp_bbox(selected, image.shape), image.shape)
                     st.rerun()
             except Exception as exc:
                 st.error(f"OpenCV ROI selector failed: {exc}")
@@ -641,7 +726,7 @@ def _numeric_bbox_editor(title: str, image: np.ndarray, prefix: str) -> None:
         )
 
     bbox = clamp_bbox(BoundingBox(int(x), int(y), int(width), int(height)), image.shape)
-    st.session_state[roi_key] = bbox
+    _store_roi(prefix, bbox, image.shape)
     st.image(
         draw_bbox(
             draw_mask_outline(
@@ -676,9 +761,12 @@ def _annotation_image(
     return out
 
 
-def _resize_for_annotation(image: np.ndarray) -> tuple[np.ndarray, float]:
+def _resize_for_annotation(
+    image: np.ndarray,
+    max_width: int = MAX_ANNOTATION_WIDTH,
+) -> tuple[np.ndarray, float]:
     h, w = image.shape[:2]
-    scale = min(1.0, MAX_ANNOTATION_WIDTH / max(1, w))
+    scale = min(1.0, max_width / max(1, w))
     display_w = max(1, int(round(w * scale)))
     display_h = max(1, int(round(h * scale)))
     if scale == 1.0:
@@ -829,8 +917,32 @@ def _centered_bbox(image: np.ndarray) -> BoundingBox:
     )
 
 
-def _store_roi(prefix: str, bbox: BoundingBox) -> None:
+def _roi_for_shape(prefix: str, image_shape: tuple[int, ...]) -> BoundingBox | None:
+    bbox = st.session_state.get(f"{prefix}_roi")
+    if bbox is None:
+        return None
+
+    source_shape = st.session_state.get(f"{prefix}_roi_shape")
+    if source_shape is not None and source_shape[:2] != image_shape[:2]:
+        return scale_bbox(bbox, source_shape, image_shape)
+    return clamp_bbox(bbox, image_shape)
+
+
+def _points_for_shape(prefix: str, image_shape: tuple[int, ...]) -> list[Point]:
+    points = list(st.session_state.get(f"{prefix}_points") or [])
+    if not points:
+        return []
+
+    source_shape = st.session_state.get(f"{prefix}_points_shape")
+    if source_shape is not None and source_shape[:2] != image_shape[:2]:
+        return scale_points(points, source_shape, image_shape)
+    return points
+
+
+def _store_roi(prefix: str, bbox: BoundingBox, image_shape: tuple[int, ...] | None = None) -> None:
     st.session_state[f"{prefix}_roi"] = bbox
+    if image_shape is not None:
+        st.session_state[f"{prefix}_roi_shape"] = image_shape
     st.session_state[f"{prefix}_roi_x"] = bbox.x
     st.session_state[f"{prefix}_roi_y"] = bbox.y
     st.session_state[f"{prefix}_roi_width"] = bbox.width
@@ -839,15 +951,18 @@ def _store_roi(prefix: str, bbox: BoundingBox) -> None:
 
 def _store_points(prefix: str, points: list[Point], image_shape: tuple[int, ...]) -> None:
     st.session_state[f"{prefix}_points"] = points
+    st.session_state[f"{prefix}_points_shape"] = image_shape
     bbox = bbox_from_points(points, image_shape)
     if bbox is not None:
-        _store_roi(prefix, bbox)
+        _store_roi(prefix, bbox, image_shape)
 
 
 def _reset_annotation(prefix: str) -> None:
     st.session_state[f"{prefix}_roi"] = None
+    st.session_state[f"{prefix}_roi_shape"] = None
     st.session_state[f"{prefix}_mask"] = None
     st.session_state[f"{prefix}_points"] = []
+    st.session_state[f"{prefix}_points_shape"] = None
     st.session_state[f"{prefix}_last_bbox_event"] = None
     st.session_state[f"{prefix}_last_point_event"] = None
 
@@ -886,7 +1001,7 @@ def _create_mask_from_roi(
         return
 
     st.session_state[f"{prefix}_mask"] = result.mask
-    _store_roi(prefix, result.bbox)
+    _store_roi(prefix, result.bbox, image.shape)
     score = f" score={result.score:.3f}" if result.score is not None else ""
     st.success(f"Created {prefix} mask with {result.method} backend.{score}")
     st.rerun()
@@ -936,6 +1051,8 @@ def _maybe_rerun_live_preview() -> None:
     if not st.session_state.get("camera_running"):
         return
     if not st.session_state.get("live_preview"):
+        return
+    if st.session_state.get("live_roi_enabled"):
         return
     fps = max(1, int(st.session_state.get("preview_fps", 5)))
     time.sleep(1.0 / fps)

@@ -9,6 +9,7 @@ pixel size and center position across the two images.
 
 - OpenCV camera input from webcam, USB camera, video file, or URL.
 - Live camera preview with optional reference bbox overlay.
+- Live real-object ROI drawing on the camera preview with overlap percentage.
 - Reference image upload or path loading.
 - Captured real frame snapshot.
 - Manual ROI selection for the reference object and the real object.
@@ -56,8 +57,9 @@ Then open the URL printed by Streamlit, usually `http://localhost:8501`.
 3. Load a reference image.
 4. Click **Capture current frame**.
 5. Enable ROI for the reference image and select the table.
-6. Enable ROI for the captured real frame and select the same table.
-7. Use the metrics and live reference bbox overlay while moving the physical
+6. Enable ROI for the captured real frame and click the four real table corners
+   in order: top-left, top-right, bottom-right, bottom-left.
+7. Use the live overlap percentage and reference bbox overlay while moving the physical
    camera.
 
 ## Mouse Annotation
@@ -73,6 +75,8 @@ Each reference/real panel has three annotation tools:
 When both reference and real images have four corners, the app also reports
 corner offsets and polygon area error. This is useful for table-top alignment
 because it compares the visible table plane more directly than a plain bbox.
+The real ROI panel defaults to **Click 4 corners** so the live preview can use
+the tight bbox from those four points for overlap percentage.
 
 ## Notes
 
