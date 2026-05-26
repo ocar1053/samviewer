@@ -8,13 +8,15 @@ import numpy as np
 
 
 CameraSource = int | str
+DEFAULT_CAPTURE_WIDTH = 1920
+DEFAULT_CAPTURE_HEIGHT = 1080
 
 
 @dataclass(frozen=True)
 class CameraConfig:
     source: CameraSource = 0
-    width: int | None = 1280
-    height: int | None = 720
+    width: int | None = DEFAULT_CAPTURE_WIDTH
+    height: int | None = DEFAULT_CAPTURE_HEIGHT
     backend: int | None = None
 
 

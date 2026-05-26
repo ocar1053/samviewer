@@ -1,0 +1,39 @@
+#V4L2/CTRL/0.0.2
+APP{"guvcview 2.0.7"}
+# control data
+#Brightness
+ID{0x00980900};CHK{1:19:1:10}=VAL{10}
+#Contrast
+ID{0x00980901};CHK{0:8:1:4}=VAL{4}
+#Saturation
+ID{0x00980902};CHK{0:20:1:10}=VAL{10}
+#Hue
+ID{0x00980903};CHK{-1000:1000:100:0}=VAL{0}
+#White Balance, Automatic
+ID{0x0098090c};CHK{0:1:1:1}=VAL{0}
+#Gain
+ID{0x00980913};CHK{0:150:1:0}=VAL{0}
+#Power Line Frequency
+ID{0x00980918};CHK{0:2:1:0}=VAL{2}
+#White Balance Temperature
+ID{0x0098091a};CHK{2800:10000:1:5000}=VAL{5000}
+#Sharpness
+ID{0x0098091b};CHK{0:6:1:0}=VAL{0}
+#Backlight Compensation
+ID{0x0098091c};CHK{0:2:1:0}=VAL{0}
+#Auto Exposure
+ID{0x009a0901};CHK{0:3:1:0}=VAL{2}
+#Exposure Time, Absolute
+ID{0x009a0902};CHK{1:10000:1:1250}=VAL{1250}
+#Pan, Absolute
+ID{0x009a0908};CHK{-1296000:1296000:3600:0}=VAL{0}
+#Tilt, Absolute
+ID{0x009a0909};CHK{-727200:727200:3600:0}=VAL{0}
+#Zoom, Absolute
+ID{0x009a090d};CHK{0:720:1:0}=VAL{0}
+#Zoom, Continuous
+ID{0x009a090f};CHK{0:1:1:1}=VAL{0}
+#Pan, Speed
+ID{0x009a0920};CHK{-1:1:1:1}=VAL{0}
+#Tilt, Speed
+ID{0x009a0921};CHK{-1:1:1:1}=VAL{0}

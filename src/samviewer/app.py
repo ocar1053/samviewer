@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -12,6 +13,8 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 
 from samviewer.camera import (
     CameraConfig,
+    DEFAULT_CAPTURE_HEIGHT,
+    DEFAULT_CAPTURE_WIDTH,
     load_rgb_image,
     open_camera,
     parse_camera_source,
@@ -43,6 +46,8 @@ MAX_ANNOTATION_WIDTH = 1280
 MAX_LIVE_ANNOTATION_WIDTH = 1280
 REFERENCE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_REFERENCE_FOLDER = "reference_images"
+DEFAULT_COMPARISON_FOLDER = "comparison_saves"
+DEFAULT_PREVIEW_FPS = 10
 DEFAULT_CAMERA_BACKEND_LABEL = "Windows DirectShow" if sys.platform.startswith("win") else "Auto"
 DEFAULT_ANNOTATION_TOOL = "Click 4 corners"
 ANNOTATION_DEFAULTS_VERSION = 3
@@ -116,6 +121,8 @@ def _init_state() -> None:
         "real_last_bbox_event": None,
         "ref_last_point_event": None,
         "real_last_point_event": None,
+        "last_comparison_image_path": None,
+        "last_comparison_data_path": None,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -168,10 +175,10 @@ def _render_sidebar() -> CameraConfig:
             source_text = source_choice
         st.session_state.camera_source_text = source_text
 
-        width = st.number_input("Capture width", min_value=0, value=1280, step=160)
-        height = st.number_input("Capture height", min_value=0, value=720, step=90)
+        width = st.number_input("Capture width", min_value=0, value=DEFAULT_CAPTURE_WIDTH, step=160)
+        height = st.number_input("Capture height", min_value=0, value=DEFAULT_CAPTURE_HEIGHT, step=90)
         st.checkbox("Live preview", key="live_preview", value=True)
-        st.slider("Preview FPS", min_value=1, max_value=15, value=5, key="preview_fps")
+        st.slider("Preview FPS", min_value=1, max_value=15, value=DEFAULT_PREVIEW_FPS, key="preview_fps")
 
         st.header("Live overlay")
         st.checkbox("Overlay reference bbox on live frame", key="overlay_ref_live", value=True)
@@ -386,6 +393,17 @@ def _render_live_panel(live_frame: np.ndarray | None, reference: np.ndarray | No
     else:
         st.image(frame, channels="RGB", use_container_width=True)
 
+    save_frame = _live_overlay_image(
+        live_frame,
+        reference,
+        ref_bbox,
+        real_bbox,
+        ref_points,
+        real_points,
+        force_reference_overlay=True,
+    )
+    _render_comparison_save_controls(save_frame, ref_bbox, real_bbox, ref_points, real_points)
+
 
 def _render_live_match_status(
     reference: np.ndarray | None,
@@ -432,14 +450,14 @@ def _live_overlay_image(
     real_bbox: BoundingBox | None,
     ref_points: list[Point],
     real_points: list[Point],
+    force_reference_overlay: bool = False,
 ) -> np.ndarray:
     frame = live_frame
 
     show_reference_overlay = (
-        st.session_state.get("overlay_ref_live")
+        (force_reference_overlay or st.session_state.get("overlay_ref_live"))
         and ref_bbox is not None
-        and len(ref_points) == 4
-        and len(real_points) == 4
+        and (len(ref_points) == 4 or (force_reference_overlay and not ref_points))
     )
 
     if show_reference_overlay:
@@ -461,6 +479,83 @@ def _live_overlay_image(
         )
 
     return frame
+
+
+def _render_comparison_save_controls(
+    frame: np.ndarray,
+    ref_bbox: BoundingBox | None,
+    real_bbox: BoundingBox | None,
+    ref_points: list[Point],
+    real_points: list[Point],
+) -> None:
+    if not _comparison_is_complete(ref_bbox, real_bbox, ref_points, real_points):
+        return
+
+    if st.button("Save comparison image + lines", use_container_width=True):
+        try:
+            image_path, data_path = _save_comparison(frame, ref_bbox, real_bbox, ref_points, real_points)
+            st.session_state.last_comparison_image_path = str(image_path)
+            st.session_state.last_comparison_data_path = str(data_path)
+            st.success(f"Saved comparison image: {image_path}")
+            st.caption(f"Line data: {data_path}")
+        except Exception as exc:
+            st.error(f"Save failed: {exc}")
+
+    last_image = st.session_state.get("last_comparison_image_path")
+    last_data = st.session_state.get("last_comparison_data_path")
+    if last_image and last_data:
+        st.caption(f"Last saved: {last_image}")
+
+
+def _save_comparison(
+    frame: np.ndarray,
+    ref_bbox: BoundingBox,
+    real_bbox: BoundingBox,
+    ref_points: list[Point],
+    real_points: list[Point],
+) -> tuple[Path, Path]:
+    output_dir = Path(DEFAULT_COMPARISON_FOLDER)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    suffix = f"{time.time_ns() % 1_000_000_000:09d}"
+    stem = f"comparison_{timestamp}_{suffix}"
+    image_path = output_dir / f"{stem}.png"
+    data_path = output_dir / f"{stem}.json"
+
+    ok = cv2.imwrite(str(image_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    if not ok:
+        raise RuntimeError(f"Could not save comparison image: {image_path}")
+
+    intersection_area, union_area, iou = compute_bbox_iou(ref_bbox, real_bbox)
+    data = {
+        "image": str(image_path),
+        "reference_bbox": bbox_to_mapping(ref_bbox),
+        "live_bbox": bbox_to_mapping(real_bbox),
+        "reference_points": _points_to_mappings(ref_points),
+        "live_points": _points_to_mappings(real_points),
+        "intersection_area_px": intersection_area,
+        "union_area_px": union_area,
+        "match_iou": iou,
+        "match_percent": iou * 100.0,
+    }
+    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return image_path, data_path
+
+
+def _comparison_is_complete(
+    ref_bbox: BoundingBox | None,
+    real_bbox: BoundingBox | None,
+    ref_points: list[Point],
+    real_points: list[Point],
+) -> bool:
+    ref_ready = ref_bbox is not None and (not ref_points or len(ref_points) == 4)
+    real_ready = real_bbox is not None and (not real_points or len(real_points) == 4)
+    return ref_ready and real_ready
+
+
+def _points_to_mappings(points: list[Point]) -> list[dict[str, float]]:
+    return [{"x": point[0], "y": point[1]} for point in points]
 
 
 def _live_bbox_editor(frame: np.ndarray, live_shape: tuple[int, ...]) -> None:
@@ -1138,7 +1233,7 @@ def _maybe_rerun_live_preview() -> None:
         return
     if _should_pause_live_refresh_for_annotation():
         return
-    fps = max(1, int(st.session_state.get("preview_fps", 5)))
+    fps = max(1, int(st.session_state.get("preview_fps", DEFAULT_PREVIEW_FPS)))
     time.sleep(1.0 / fps)
     st.rerun()
 
